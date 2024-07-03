@@ -29,6 +29,8 @@ services:
       container_name: broker
       ports:
         - '9092:9092'
+        - '29093:29093'
+        - '19092:19092'
       environment:
         KAFKA_CFG_NODE_ID: 1
         KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
