@@ -11,12 +11,10 @@ import {
   CKafkaConsume,
   CKafka,
   KafkaConfig,
+  Message,
+  logLevel,
 }
 from "./index";
-
-import {
-  KafkaJS,
-} from "@confluentinc/kafka-javascript";
 
 // These tests require local Kafka to run.
 // Without it, they're automatically skipped.
@@ -49,7 +47,7 @@ const kafkaConfig: KafkaConfig = {
   retry: { // FOR TESTING
     retries: 5
   },
-  logLevel: KafkaJS.logLevel.INFO,
+  logLevel: logLevel.INFO,
 }
 
 const wf1Topic = 'dbos-test-wf-topic';
@@ -147,8 +145,8 @@ class DBOSTestClass {
 
   @CKafkaConsume(wf1Topic)
   @Workflow()
-  static async testWorkflow(_ctxt: WorkflowContext, topic: string, _partition: number, message: KafkaJS.Message) {
-    console.log('got something 1');
+  static async testWorkflow(_ctxt: WorkflowContext, topic: string, _partition: number, message: Message) {
+    console.log(`got something 1 ${topic}`);
     if (topic == wf1Topic && message.value?.toString() === wfMessage) {
       wfCounter = wfCounter + 1;
       DBOSTestClass.wfResolve();
@@ -158,8 +156,8 @@ class DBOSTestClass {
 
   @CKafkaConsume(patternTopic)
   @Workflow()
-  static async testConsumeTopicsByPattern(_ctxt: WorkflowContext, topic: string, _partition: number, message: KafkaJS.Message) {
-    console.log('got something 2');
+  static async testConsumeTopicsByPattern(_ctxt: WorkflowContext, topic: string, _partition: number, message: Message) {
+    console.log(`got something 2 ${topic}`);
     const isWfMessage = topic == wf1Topic && message.value?.toString() === wfMessage;
     const isWf2Message = topic == wf2Topic && message.value?.toString() === wfMessage;
     if ( isWfMessage || isWf2Message ) {
@@ -173,8 +171,8 @@ class DBOSTestClass {
 
   @CKafkaConsume(arrayTopics)
   @Workflow()
-  static async testConsumeTopicsArray(_ctxt: WorkflowContext, topic: string, _partition: number, message: KafkaJS.Message) {
-    console.log('got something 3');
+  static async testConsumeTopicsArray(_ctxt: WorkflowContext, topic: string, _partition: number, message: Message) {
+    console.log(`got something 3 ${topic}`);
     const isWfMessage = topic == wf1Topic && message.value?.toString() === wfMessage;
     const isWf2Message = topic == wf2Topic && message.value?.toString() === wfMessage;
     if ( isWfMessage || isWf2Message) {

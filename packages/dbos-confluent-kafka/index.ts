@@ -20,6 +20,8 @@ import {
 } from "@confluentinc/kafka-javascript";
 
 export type KafkaConfig = KafkaJS.KafkaConfig;
+export const logLevel = KafkaJS.logLevel;
+export type Message = KafkaJS.Message;
 
 const sleepms = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -46,6 +48,7 @@ export class DBOSConfluentKafka implements DBOSEventReceiver {
         const method = registeredOperation.methodReg;
         const cname = method.className;
         const mname = method.name;
+        console.log(`Registering ${cname}.${mname}:${JSON.stringify(ro.kafkaTopics)}`)
         if (!method.txnConfig && !method.workflowConfig) {
           throw new DBOSError.DBOSError(`Error registering method ${cname}.${mname}: A Kafka decorator can only be assigned to a transaction or workflow!`)
         }
@@ -55,11 +58,13 @@ export class DBOSConfluentKafka implements DBOSEventReceiver {
         const topics: Array<string | RegExp> = [];
         if (Array.isArray(ro.kafkaTopics) ) {
           topics.push(...ro.kafkaTopics)
-        } else
-        if (ro.kafkaTopics) {
+        }
+        else if (ro.kafkaTopics) {
           topics.push(ro.kafkaTopics)
         }
-        const kafka = new KafkaJS.Kafka({kafkaJS: defaults.kafkaConfig});
+        let clientId = defaults.kafkaConfig.clientId ?? 'dbos-kafka';
+        clientId = clientId + `${cname}-${mname}`;
+        const kafka = new KafkaJS.Kafka({kafkaJS: {...defaults.kafkaConfig, clientId: clientId }});
         const consumerConfig = ro.consumerConfig
           ? {...ro.consumerConfig, 'auto.offset.reset': 'earliest'}
           : { "group.id": `${this.safeGroupName(topics)}`, 'auto.offset.reset': 'earliest' };
@@ -69,11 +74,12 @@ export class DBOSConfluentKafka implements DBOSEventReceiver {
         // A temporary workaround for https://github.com/tulios/kafkajs/pull/1558 until it gets fixed
         // If topic autocreation is on and you try to subscribe to a nonexistent topic, KafkaJS should retry until the topic is created.
         // However, it has a bug where it won't. Thus, we retry instead.
-        const maxRetries = /*defaults.kafkaConfig.retry ? defaults.kafkaConfig.retry.retries ?? 5 :*/ 5;
-        let retryTime = /*defaults.kafkaConfig.retry ? defaults.kafkaConfig.retry.maxRetryTime ?? 300 :*/ 300;
-        const multiplier = /*defaults.kafkaConfig.retry ? defaults.kafkaConfig.retry.multiplier ?? 2 :*/ 2;
+        const maxRetries = defaults.kafkaConfig.retry ? defaults.kafkaConfig.retry.retries ?? 5 : 5;
+        let retryTime = defaults.kafkaConfig.retry ? defaults.kafkaConfig.retry.maxRetryTime ?? 300 : 300;
+        const multiplier = /* defaults.kafkaConfig.retry ? defaults.kafkaConfig.retry.multiplier ?? 2 :*/ 2;
         for (let i = 0; i < maxRetries; i++) {
           try {
+            console.log(`Subscribe to ${JSON.stringify(topics)}`);
             await consumer.subscribe({ topics: topics });
             break;
           } catch (error) {
@@ -161,7 +167,8 @@ export function CKafkaConsume(topics: string | RegExp | Array<string | RegExp>, 
     target: object,
     propertyKey: string,
     inDescriptor: TypedPropertyDescriptor<(this: This, ctx: Ctx, ...args: KafkaArgs) => Promise<Return>>
-  ) {
+  )
+  {
     if (!kafkaInst) kafkaInst = new DBOSConfluentKafka();
     const {descriptor, receiverInfo} = associateMethodWithEventReceiver(kafkaInst, target, propertyKey, inDescriptor);
 
