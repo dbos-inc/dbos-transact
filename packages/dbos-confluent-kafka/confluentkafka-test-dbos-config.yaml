@@ -15,10 +15,3 @@ database:
     - npx knex migrate:latest
   rollback:
     - npx knex migrate:rollback
-application:
-  aws_sqs_configuration: 'aws_config'
-  sqs_queue: ${SQS_QUEUE_URL}
-  aws_config:
-    aws_region: ${AWS_REGION}
-    aws_access_key_id: ${AWS_ACCESS_KEY_ID}
-    aws_secret_access_key: ${AWS_SECRET_ACCESS_KEY}

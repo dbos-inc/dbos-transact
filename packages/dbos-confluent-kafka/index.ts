@@ -5,266 +5,219 @@ import {
   ConfiguredInstance,
   Error as DBOSError,
 
+  DBOSContext,
   DBOSEventReceiver,
   DBOSExecutorContext,
-  WorkflowContext,
   WorkflowFunction,
+  TransactionFunction,
   associateClassWithEventReceiver,
   associateMethodWithEventReceiver,
 } from '@dbos-inc/dbos-sdk';
 
-import { DeleteMessageCommand, GetQueueAttributesCommand, GetQueueAttributesCommandInput, Message, ReceiveMessageCommand, ReceiveMessageCommandOutput, SQSClient, SendMessageCommand, SendMessageCommandInput } from "@aws-sdk/client-sqs";
-import { AWSServiceConfig, getAWSConfigForService, loadAWSConfigByName } from '@dbos-inc/aws-config';
+import {
+  KafkaJS,
+  LibrdKafkaError as KafkaError
+} from "@confluentinc/kafka-javascript";
 
-// Create a new type that omits the QueueUrl property
-type MessageWithoutQueueUrl = Omit<SendMessageCommandInput, 'QueueUrl'>;
+export type KafkaConfig = KafkaJS.KafkaConfig;
 
-// Create a new type that allows QueueUrl to be added later
-type MessageWithOptionalQueueUrl = MessageWithoutQueueUrl & { QueueUrl?: string };
+const sleepms = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+type KafkaArgs = [string, number, KafkaJS.KafkaMessage]
 
-interface SQSConfig {
-    awscfgname?: string;
-    awscfg?: AWSServiceConfig;
-    queueURL?: string;
-    getWFKey?: (m: Message) => string;
+////////////////////////
+/* Kafka Management  */
+///////////////////////
+
+export class DBOSConfluentKafka implements DBOSEventReceiver {
+  readonly consumers: KafkaJS.Consumer[] = [];
+
+  executor?: DBOSExecutorContext = undefined;
+
+  constructor() { }
+
+  async initialize(dbosExecI: DBOSExecutorContext) {
+    this.executor = dbosExecI;
+    const regops = this.executor.getRegistrationsFor(this);
+    for (const registeredOperation of regops) {
+      const ro = registeredOperation.methodConfig as KafkaRegistrationInfo;
+      if (ro.kafkaTopics) {
+        const defaults = registeredOperation.classConfig as KafkaDefaults;
+        const method = registeredOperation.methodReg;
+        const cname = method.className;
+        const mname = method.name;
+        if (!method.txnConfig && !method.workflowConfig) {
+          throw new DBOSError.DBOSError(`Error registering method ${cname}.${mname}: A Kafka decorator can only be assigned to a transaction or workflow!`)
+        }
+        if (!defaults.kafkaConfig) {
+          throw new DBOSError.DBOSError(`Error registering method ${cname}.${mname}: Kafka configuration not found. Does class ${cname} have an @Kafka decorator?`)
+        }
+        const topics: Array<string | RegExp> = [];
+        if (Array.isArray(ro.kafkaTopics) ) {
+          topics.push(...ro.kafkaTopics)
+        } else
+        if (ro.kafkaTopics) {
+          topics.push(ro.kafkaTopics)
+        }
+        const kafka = new KafkaJS.Kafka({kafkaJS: defaults.kafkaConfig});
+        const consumerConfig = ro.consumerConfig
+          ? {...ro.consumerConfig, 'auto.offset.reset': 'earliest'}
+          : { "group.id": `${this.safeGroupName(topics)}`, 'auto.offset.reset': 'earliest' };
+        const consumer = kafka.consumer(consumerConfig);
+        await consumer.connect();
+        // Unclear if we need this:
+        // A temporary workaround for https://github.com/tulios/kafkajs/pull/1558 until it gets fixed
+        // If topic autocreation is on and you try to subscribe to a nonexistent topic, KafkaJS should retry until the topic is created.
+        // However, it has a bug where it won't. Thus, we retry instead.
+        const maxRetries = /*defaults.kafkaConfig.retry ? defaults.kafkaConfig.retry.retries ?? 5 :*/ 5;
+        let retryTime = /*defaults.kafkaConfig.retry ? defaults.kafkaConfig.retry.maxRetryTime ?? 300 :*/ 300;
+        const multiplier = /*defaults.kafkaConfig.retry ? defaults.kafkaConfig.retry.multiplier ?? 2 :*/ 2;
+        for (let i = 0; i < maxRetries; i++) {
+          try {
+            await consumer.subscribe({ topics: topics });
+            break;
+          } catch (error) {
+            const e = error as KafkaError;
+            if (e.code === 3 && i + 1 < maxRetries) { // UNKNOWN_TOPIC_OR_PARTITION
+              await sleepms(retryTime);
+              retryTime *= multiplier;
+              continue;
+            } else {
+              throw error;
+            }
+          }
+        }
+        await consumer.run({
+          eachMessage: async ({ topic, partition, message }) => {
+            // This combination uniquely identifies a message for a given Kafka cluster
+            const workflowUUID = `kafka-unique-id-${topic}-${partition}-${message.offset}`
+            const wfParams = { workflowUUID: workflowUUID, configuredInstance: null };
+            // All operations annotated with Kafka decorators must take in these three arguments
+            const args: KafkaArgs = [topic, partition, message];
+            // We can only guarantee exactly-once-per-message execution of transactions and workflows.
+            if (method.txnConfig) {
+              // Execute the transaction
+              await this.executor!.transaction(method.registeredFunction as TransactionFunction<unknown[], unknown>, wfParams, ...args);
+            } else if (method.workflowConfig) {
+              // Safely start the workflow
+              await this.executor!.workflow(method.registeredFunction as unknown as WorkflowFunction<unknown[], unknown>, wfParams, ...args);
+            }
+          },
+        })
+        this.consumers.push(consumer);
+      }
+    }
+  }
+
+  async destroy() {
+    for (const consumer of this.consumers) {
+      await consumer.disconnect();
+    }
+  }
+
+  safeGroupName(topics: Array<string | RegExp>) {
+    const safeGroupIdPart =  topics
+      .map(r => r.toString())
+      .map( r => r.replaceAll(/[^a-zA-Z0-9\\-]/g, ''))
+      .join('-');
+    return `dbos-kafka-group-${safeGroupIdPart}`.slice(0, 255);
+  }
+
+  logRegisteredEndpoints() {
+    if (!this.executor) return;
+    const logger = this.executor.logger;
+    logger.info("Kafka endpoints supported:");
+    const regops = this.executor.getRegistrationsFor(this);
+    regops.forEach((registeredOperation) => {
+      const ro = registeredOperation.methodConfig as KafkaRegistrationInfo;
+      if (ro.kafkaTopics) {
+        const cname = registeredOperation.methodReg.className;
+        const mname = registeredOperation.methodReg.name;
+        if (Array.isArray(ro.kafkaTopics)) {
+          ro.kafkaTopics.forEach( kafkaTopic => {
+            logger.info(`    ${kafkaTopic} -> ${cname}.${mname}`);
+          });
+        } else {
+          logger.info(`    ${ro.kafkaTopics} -> ${cname}.${mname}`);
+        }
+      }
+    });
+  }
 }
 
-class SQSCommunicator extends ConfiguredInstance
+/////////////////////////////
+/* Kafka Method Decorators */
+/////////////////////////////
+
+let kafkaInst: DBOSConfluentKafka | undefined = undefined;
+
+export interface KafkaRegistrationInfo {
+  kafkaTopics?: string | RegExp | Array<string | RegExp>;
+  consumerConfig?: KafkaConfig;
+}
+
+export function CKafkaConsume(topics: string | RegExp | Array<string | RegExp>, consumerConfig?: KafkaConfig) {
+  function kafkadec<This, Ctx extends DBOSContext, Return>(
+    target: object,
+    propertyKey: string,
+    inDescriptor: TypedPropertyDescriptor<(this: This, ctx: Ctx, ...args: KafkaArgs) => Promise<Return>>
+  ) {
+    if (!kafkaInst) kafkaInst = new DBOSConfluentKafka();
+    const {descriptor, receiverInfo} = associateMethodWithEventReceiver(kafkaInst, target, propertyKey, inDescriptor);
+
+    const kafkaRegistration = receiverInfo as KafkaRegistrationInfo;
+    kafkaRegistration.kafkaTopics = topics;
+    kafkaRegistration.consumerConfig = consumerConfig;
+
+    return descriptor;
+  }
+  return kafkadec;
+}
+
+/////////////////////////////
+/* Kafka Class Decorators  */
+/////////////////////////////
+
+export interface KafkaDefaults {
+  kafkaConfig?: KafkaConfig;
+}
+
+export function CKafka(kafkaConfig: KafkaConfig) {
+  function clsdec<T extends { new(...args: unknown[]): object }>(ctor: T) {
+    if (!kafkaInst) kafkaInst = new DBOSConfluentKafka();
+    const kafkaInfo = associateClassWithEventReceiver(kafkaInst, ctor) as KafkaDefaults;
+    kafkaInfo.kafkaConfig = kafkaConfig;
+  }
+  return clsdec;
+}
+
+//////////////////////////////
+/* Producer Communicator    */
+//////////////////////////////
+export class KafkaProduceCommunicator extends ConfiguredInstance
 {
-    config: SQSConfig;
-    client?: SQSClient;
+  producer: KafkaJS.Producer | undefined = undefined;
+  topic: string = "";
 
-    constructor(name: string, cfg: SQSConfig) {
-        super(name);
-	    this.config = cfg;
-    }
+  constructor(name: string, readonly cfg: KafkaJS.ProducerConfig, topic: string) {
+    super(name);
+    this.topic = topic;
+  }
 
-    static AWS_SQS_CONFIGURATION = 'aws_sqs_configuration';
-    async initialize(ctx: InitContext) {
-        // Get the config and call the validation
-        if (!this.config.awscfg) {
-            if (this.config.awscfgname) {
-                this.config.awscfg = loadAWSConfigByName(ctx, this.config.awscfgname);
-            }
-            else {
-                this.config.awscfg = getAWSConfigForService(ctx, SQSCommunicator.AWS_SQS_CONFIGURATION);
-            }
-        }
-        if (!this.config.awscfg) {
-            throw new Error(`AWS Configuration not specified for SQSCommunicator: ${this.name}`);
-        }
-	    this.client = SQSCommunicator.createSQS(this.config.awscfg);
-        return Promise.resolve();
-    }
+  async initialize(_ctx: InitContext): Promise<void> {
+    const kafka = new KafkaJS.Kafka({});
+    this.producer = kafka.producer({kafkaJS: this.cfg});
+    await this.producer.connect();
+    return Promise.resolve();
+  }
 
-    static async validateConnection(client: SQSClient, url: string) {
-        const params: GetQueueAttributesCommandInput = {
-            QueueUrl: url,
-            AttributeNames: ["All"],
-        };
+  @Communicator()
+  async sendMessage(_ctx: CommunicatorContext, msg: KafkaJS.Message) {
+    return await this.producer?.send({topic: this.topic, messages:[msg]});
+  }
 
-        const _validateSQSConfiguration = await client.send(new GetQueueAttributesCommand(params));
-    }
-
-    @Communicator()
-    async sendMessage(
-        ctx: CommunicatorContext,
-	    msg: MessageWithOptionalQueueUrl,
-    )
-    {
-        try {
-            const smsg = {...msg, QueueUrl: msg.QueueUrl || this.config.queueURL};
-            return await this.client!.send(new SendMessageCommand(smsg));
-        }
-        catch (e) {
-            ctx.logger.error(e);
-            throw e;
-        }
-    }
-
-    static createSQS(cfg: AWSServiceConfig) {
-        return new SQSClient({
-            region: cfg.region,
-            credentials: cfg.credentials,
-            maxAttempts: cfg.maxRetries,
-            //logger: console,
-        });
-    }
-}
-
-interface SQSReceiverClassDefaults {
-    config?: SQSConfig;
-}
-
-interface SQSReceiverMethodSpecifics {
-    config?: SQSConfig;
-}
-
-class SQSReceiver implements DBOSEventReceiver
-{
-    executor?: DBOSExecutorContext;
-    listeners: Promise<void>[] = [];
-    isShuttingDown = false;
-
-    async destroy() {
-        this.isShuttingDown = true;
-        try {
-            await Promise.allSettled(this.listeners);
-        }
-        catch (e) {
-            // yawn
-        }
-        this.listeners = [];
-    }
-
-    // async function that uses .then/.catch to handle potentially unreliable library calls
-    static async sendMessageSafe(sqs: SQSClient, params: ReceiveMessageCommand) : Promise<ReceiveMessageCommandOutput> {
-        return new Promise((resolve, reject) => {
-        sqs.send(params)
-            .then(response => resolve(response))
-            .catch(error => reject(error as Error));
-        });
-    }
-
-    async initialize(executor: DBOSExecutorContext) {
-        this.executor = executor;
-        const regops = this.executor.getRegistrationsFor(this);
-        for (const registeredOperation of regops) {
-            const cro = registeredOperation.classConfig as SQSReceiverClassDefaults;
-            const mro = registeredOperation.methodConfig as SQSReceiverMethodSpecifics;
-            const url = cro.config?.queueURL ?? mro.config?.queueURL;
-            if (url) {
-                const method = registeredOperation.methodReg;
-                const cname = method.className;
-                const mname = method.name;
-                if (!method.workflowConfig) {
-                    throw new DBOSError.DBOSError(`Error registering method ${cname}.${mname}: An SQS decorator can only be assigned to a workflow!`)
-                }
-                let awscfg = mro.config?.awscfg;
-                if (!awscfg && mro.config?.awscfgname) {
-                    awscfg = loadAWSConfigByName(this.executor, mro.config.awscfgname);
-                }
-                if (!awscfg && cro.config?.awscfg) {
-                    awscfg = cro.config.awscfg;
-                }
-                if (!awscfg && cro.config?.awscfgname) {
-                    awscfg = loadAWSConfigByName(this.executor, cro.config.awscfgname);
-                }
-                if (!awscfg) {
-                    awscfg = getAWSConfigForService(this.executor, SQSCommunicator.AWS_SQS_CONFIGURATION);
-                }
-                if (!awscfg) {
-                    throw new DBOSError.DBOSError(`AWS Configuration not specified for SQS Receiver: ${cname}.${mname}`);
-                }
-
-                const sqs = SQSCommunicator.createSQS(awscfg);
-                try {
-                    await SQSCommunicator.validateConnection(sqs, url);
-                    executor.logger.info(`Successfully connected to SQS queue ${url} for ${cname}.${mname}`);
-                }
-                catch (e) { 
-                    const err = e as Error;
-                    executor.logger.error(err);
-                    throw new DBOSError.DBOSError(`SQS Receiver for ${cname}.${mname} was unable to connect: ${err.message}`);
-                }
-                this.listeners.push((async (client: SQSClient, url: string) =>
-                {
-                    const executor = this.executor;
-                    if (!executor) return;
-            
-                    while (!this.isShuttingDown) {
-                        // Get message
-                        try {                
-                            const response = await SQSReceiver.sendMessageSafe(client, new ReceiveMessageCommand({
-                                QueueUrl: url,
-                                MaxNumberOfMessages: 1,
-                                WaitTimeSeconds: 5
-                            }));
-            
-                            if (!response.Messages || response.Messages.length === 0) {
-                                executor.logger.debug(`No messages for ${url} - `);
-                                continue;
-                            }
-
-                            const message = response.Messages[0];
-
-                            // Start workflow
-                            let wfid = mro.config?.getWFKey ? mro.config.getWFKey(message) : undefined;
-                            if (!wfid) {
-                                wfid = cro.config?.getWFKey ? cro.config.getWFKey(message) : undefined;
-                            }
-                            if (!wfid) wfid = message.MessageId;
-                            await executor.workflow(method.registeredFunction as unknown as WorkflowFunction<unknown[], unknown>, {workflowUUID: wfid}, [message]);
-            
-                            // Delete the message from the queue after starting workflow (which will take over retries)
-                            await client.send(new DeleteMessageCommand({
-                                QueueUrl: url,
-                                ReceiptHandle: message.ReceiptHandle
-                            }));
-                        }
-                        catch (e) {
-                            executor.logger.error(e);
-                        }
-                    }
-                })(sqs, url));          
-            }
-        }
-    }
-
-    logRegisteredEndpoints() {
-        if (!this.executor) return;
-        const logger = this.executor.logger;
-        logger.info("SQS receiver endpoints:");
-        const regops = this.executor.getRegistrationsFor(this);
-        regops.forEach((registeredOperation) => {
-            const co = registeredOperation.classConfig as SQSReceiverClassDefaults;
-            const mo = registeredOperation.methodConfig as SQSReceiverMethodSpecifics;
-            const url = co.config?.queueURL ?? mo.config?.queueURL;
-            if (url) {
-                const cname = registeredOperation.methodReg.className;
-                const mname = registeredOperation.methodReg.name;
-                logger.info(`    ${url} -> ${cname}.${mname}`);
-            }
-        });    
-    }
-}
-
-let sqsRcv: SQSReceiver | undefined = undefined;
-
-// Decorators - class
-function SQSConfigure(config: SQSConfig) {
-    function clsdec<T extends { new(...args: unknown[]): object }>(ctor: T) {
-        if (!sqsRcv) sqsRcv = new SQSReceiver();
-        const erInfo = associateClassWithEventReceiver(sqsRcv, ctor) as SQSReceiverClassDefaults;
-        erInfo.config = config;
-    }
-    return clsdec;
-}
-
-// Decorators - method  
-function SQSMessageConsumer(config?: SQSConfig) {
-    function mtddec<This, Ctx extends WorkflowContext, Return>(
-        target: object,
-        propertyKey: string,
-        inDescriptor: TypedPropertyDescriptor<(this: This, ctx: Ctx, ...args: [Message]) => Promise<Return>>
-    ) {
-        if (!sqsRcv) sqsRcv = new SQSReceiver();
-
-        const {descriptor, receiverInfo} = associateMethodWithEventReceiver(sqsRcv, target, propertyKey, inDescriptor);
-  
-        const mRegistration = receiverInfo as SQSReceiverMethodSpecifics;
-        mRegistration.config = config;
-  
-        return descriptor;
-    }
-    return mtddec;
-}
-
-export {
-    SQSConfig,
-    SQSCommunicator,
-    SQSConfigure,
-    SQSMessageConsumer,
-    SQSReceiver,
+  @Communicator()
+  async sendMessages(_ctx: CommunicatorContext, msg: KafkaJS.Message[]) {
+    return await this.producer?.send({topic: this.topic, messages:msg});
+  }
 }
