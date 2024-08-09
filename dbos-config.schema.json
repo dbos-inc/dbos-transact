@@ -61,10 +61,6 @@
           "description": "Specify the database client to use to connect to the application database",
           "enum": ["pg-node", "prisma", "typeorm", "knex", "drizzle"]
         },
-        "schemas": {
-          "type": "array",
-          "description": "Specify a list of DB schema file paths"
-        },
         "migrate": {
           "type": "array",
           "description": "Specify a list of user DB migration commands to run"
