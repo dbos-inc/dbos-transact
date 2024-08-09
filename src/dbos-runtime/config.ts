@@ -1,19 +1,19 @@
-import { DBOSInitializationError } from "../error";
-import { DBOSJSON, findPackageRoot, readFileSync } from "../utils";
-import { DBOSConfig } from "../dbos-executor";
+import Ajv, { ValidateFunction } from "ajv";
+import { writeFileSync } from "fs";
+import path from "path";
 import { PoolConfig } from "pg";
 import YAML from "yaml";
-import { DBOSRuntimeConfig, defaultEntryPoint } from "./runtime";
-import { UserDatabaseName } from "../user_database";
+import { DBOSConfig } from "../dbos-executor";
+import { DBOSInitializationError } from "../error";
 import { TelemetryConfig } from "../telemetry";
-import { writeFileSync } from "fs";
-import Ajv, { ValidateFunction } from 'ajv';
-import path from "path";
+import { UserDatabaseName } from "../user_database";
+import { DBOSJSON, findPackageRoot, readFileSync } from "../utils";
+import { DBOSRuntimeConfig, defaultEntryPoint } from "./runtime";
 
 export const dbosConfigFilePath = "dbos-config.yaml";
-const dbosConfigSchemaPath = path.join(findPackageRoot(__dirname), 'dbos-config.schema.json');
+const dbosConfigSchemaPath = path.join(findPackageRoot(__dirname), "dbos-config.schema.json");
 const dbosConfigSchema = DBOSJSON.parse(readFileSync(dbosConfigSchemaPath)) as object;
-const ajv = new Ajv({allErrors: true, verbose: true});
+const ajv = new Ajv({ allErrors: true, verbose: true });
 
 export interface ConfigFile {
   name?: string;
@@ -31,6 +31,7 @@ export interface ConfigFile {
     app_db_client?: UserDatabaseName;
     migrate?: string[];
     rollback?: string[];
+    schemas?: string[];
   };
   http?: {
     cors_middleware?: boolean;
@@ -84,7 +85,7 @@ export function writeConfigFile(configFile: ConfigFile, configFilePath: string) 
 }
 
 export function constructPoolConfig(configFile: ConfigFile) {
-   const poolConfig: PoolConfig = {
+  const poolConfig: PoolConfig = {
     host: configFile.database.hostname,
     port: configFile.database.port,
     user: configFile.database.username,
@@ -100,7 +101,7 @@ export function constructPoolConfig(configFile: ConfigFile) {
   // Details on Postgres SSL/TLS modes: https://www.postgresql.org/docs/current/libpq-ssl.html#LIBPQ-SSL-PROTECTION
   if (configFile.database.ssl === false) {
     // If SSL is set to false, do not use TLS
-    poolConfig.ssl = false
+    poolConfig.ssl = false;
   } else if (configFile.database.ssl_ca) {
     // If an SSL certificate is provided, connect to Postgres using TLS and verify the server certificate. (equivalent to verify-full)
     poolConfig.ssl = { ca: [readFileSync(configFile.database.ssl_ca)], rejectUnauthorized: true };
@@ -115,17 +116,19 @@ export function constructPoolConfig(configFile: ConfigFile) {
 }
 
 function prettyPrintAjvErrors(validate: ValidateFunction<unknown>) {
-  return validate.errors!.map(error => {
-    let message = `Error: ${error.message}`;
-    if (error.schemaPath) message += ` (schema path: ${error.schemaPath})`;
-    if (error.params && error.keyword === 'additionalProperties') {
-      message += `; the additional property '${error.params.additionalProperty}' is not allowed`;
-    }
-    if (error.data && error.keyword === 'not') {
-      message += `; the value ${DBOSJSON.stringify(error.data)} is not allowed for field ${error.instancePath}`
-    }
-    return message;
-  }).join(', ');
+  return validate
+    .errors!.map((error) => {
+      let message = `Error: ${error.message}`;
+      if (error.schemaPath) message += ` (schema path: ${error.schemaPath})`;
+      if (error.params && error.keyword === "additionalProperties") {
+        message += `; the additional property '${error.params.additionalProperty}' is not allowed`;
+      }
+      if (error.data && error.keyword === "not") {
+        message += `; the value ${DBOSJSON.stringify(error.data)} is not allowed for field ${error.instancePath}`;
+      }
+      return message;
+    })
+    .join(", ");
 }
 
 export interface ParseOptions {
@@ -142,7 +145,7 @@ export interface ParseOptions {
  * */
 export function parseConfigFile(cliOptions?: ParseOptions, useProxy: boolean = false): [DBOSConfig, DBOSRuntimeConfig] {
   if (cliOptions?.appDir) {
-    process.chdir(cliOptions.appDir)
+    process.chdir(cliOptions.appDir);
   }
   const configFilePath = cliOptions?.configfile ?? dbosConfigFilePath;
   const configFile: ConfigFile | undefined = loadConfigFile(configFilePath);
@@ -176,7 +179,7 @@ export function parseConfigFile(cliOptions?: ParseOptions, useProxy: boolean = f
   }
 
   if (configFile.language && configFile.language != "node") {
-    throw new DBOSInitializationError(`dbos-config.yaml specifies invalid language ${configFile.language}`)
+    throw new DBOSInitializationError(`dbos-config.yaml specifies invalid language ${configFile.language}`);
   }
 
   /*******************************/
@@ -205,6 +208,7 @@ export function parseConfigFile(cliOptions?: ParseOptions, useProxy: boolean = f
   /************************************/
   const dbosConfig: DBOSConfig = {
     poolConfig: poolConfig,
+    schemas: configFile.database.schemas || [],
     userDbclient: configFile.database.app_db_client || UserDatabaseName.KNEX,
     telemetry: configFile.telemetry || undefined,
     system_database: configFile.database.sys_db_name ?? `${poolConfig.database}_dbos_sys`,
@@ -233,7 +237,11 @@ export function parseConfigFile(cliOptions?: ParseOptions, useProxy: boolean = f
 }
 
 function getAppVersion(appVersion: string | boolean | undefined) {
-  if (typeof appVersion === "string") { return appVersion; }
-  if (appVersion === false) { return undefined; }
+  if (typeof appVersion === "string") {
+    return appVersion;
+  }
+  if (appVersion === false) {
+    return undefined;
+  }
   return process.env.DBOS__APPVERSION;
 }

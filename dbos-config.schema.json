@@ -11,10 +11,7 @@
     "language": {
       "type": "string",
       "description": "The language used in your application",
-      "enum": [
-        "node",
-        "python"
-      ]
+      "enum": ["node", "python"]
     },
     "database": {
       "type": "object",
@@ -62,13 +59,11 @@
         "app_db_client": {
           "type": "string",
           "description": "Specify the database client to use to connect to the application database",
-          "enum": [
-            "pg-node",
-            "prisma",
-            "typeorm",
-            "knex",
-            "drizzle"
-          ]
+          "enum": ["pg-node", "prisma", "typeorm", "knex", "drizzle"]
+        },
+        "schemas": {
+          "type": "array",
+          "description": "Specify a list of DB schema file paths"
         },
         "migrate": {
           "type": "array",
@@ -79,13 +74,7 @@
           "description": "Specify a list of user DB rollback commands to run"
         }
       },
-      "required": [
-        "hostname",
-        "port",
-        "username",
-        "password",
-        "app_db_name"
-      ]
+      "required": ["hostname", "port", "username", "password", "app_db_name"]
     },
     "telemetry": {
       "type": "object",
@@ -165,7 +154,5 @@
       "deprecated": true
     }
   },
-  "required": [
-    "database"
-  ]
+  "required": ["database"]
 }
