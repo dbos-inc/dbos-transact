@@ -31,7 +31,6 @@ export interface ConfigFile {
     app_db_client?: UserDatabaseName;
     migrate?: string[];
     rollback?: string[];
-    schemas?: string[];
   };
   http?: {
     cors_middleware?: boolean;
@@ -208,7 +207,6 @@ export function parseConfigFile(cliOptions?: ParseOptions, useProxy: boolean = f
   /************************************/
   const dbosConfig: DBOSConfig = {
     poolConfig: poolConfig,
-    schemas: configFile.database.schemas || [],
     userDbclient: configFile.database.app_db_client || UserDatabaseName.KNEX,
     telemetry: configFile.telemetry || undefined,
     system_database: configFile.database.sys_db_name ?? `${poolConfig.database}_dbos_sys`,

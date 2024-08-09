@@ -57,7 +57,6 @@ export const dbosNull: DBOSNull = {};
 /* Interface for DBOS configuration */
 export interface DBOSConfig {
   readonly poolConfig: PoolConfig;
-  readonly schemas?: string[];
   readonly userDbclient?: UserDatabaseName;
   readonly telemetry?: TelemetryConfig;
   readonly system_database: string;
