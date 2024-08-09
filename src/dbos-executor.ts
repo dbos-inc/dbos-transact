@@ -284,14 +284,8 @@ export class DBOSExecutor implements DBOSExecutorContext {
       const DrizzleExports = require("drizzle-orm/node-postgres");
       const drizzlePool = new Pool(userDBConfig);
 
-      /**
-       * Parse schema paths from dbos-config.yaml. These will be relative to the project root:
-       */
-      // const schema = Object.assign({}, ...schemas);
-      const schema = this.entities;
-
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const drizzle = DrizzleExports.drizzle(drizzlePool, { schema });
+      const drizzle = DrizzleExports.drizzle(drizzlePool, { schema: this.entities });
 
       // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
       this.userDatabase = new DrizzleUserDatabase(drizzlePool, drizzle);
